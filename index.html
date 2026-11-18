@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Subway Runner 3D — Mobile</title>
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{ "imports": { "three": "./three.module.js" } }
+</script>
+</head>
+<body>
+<div id="hud" style="display:none">
+  <div class="hud-left"><span id="score">0</span><small>рахунок</small></div>
+  <div class="hud-mid"><span id="biome">DAY_CITY</span></div>
+  <div class="hud-right">
+    <span class="coin-pill">🪙 <b id="coins">0</b></span>
+    <button id="pauseBtn" aria-label="Пауза">⏸</button>
+    <button id="muteBtn" aria-label="Звук">🔊</button>
+  </div>
+</div>
+<div id="fps" style="display:none"></div>
+
+<div id="menu">
+  <h1>SUBWAY<br>RUNNER&nbsp;3D</h1>
+  <p class="tag">Біги • Ухиляйся • Збирай монети</p>
+  <div class="chars">
+    <button class="charBtn sel" data-i="0" aria-label="Герой 1"><span class="dot" style="background:#f2a51e"></span></button>
+    <button class="charBtn" data-i="1" aria-label="Герой 2"><span class="dot" style="background:#2e6fbf"></span></button>
+    <button class="charBtn" data-i="2" aria-label="Герой 3"><span class="dot" style="background:#35b06f"></span></button>
+  </div>
+  <button id="startBtn">ГРАТИ</button>
+  <p class="hint">Свайп: ← → зміна смуги &nbsp;·&nbsp; ↑ стрибок &nbsp;·&nbsp; ↓ підкат<br>Клавіші: WASD / стрілки / Space</p>
+</div>
+
+<div id="gameover" style="display:none">
+  <h2>ГОНКА ЗАВЕРШЕНА</h2>
+  <p id="finalScore">Рахунок: 0</p>
+  <p id="bestScore" class="best">Рекорд: 0</p>
+  <button id="retryBtn">ЩЕ РАЗ</button>
+</div>
+
+<div id="pauseOverlay" style="display:none">
+  <h2>ПАУЗА</h2>
+  <button id="resumeBtn">ПРОДОВЖИТИ</button>
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
