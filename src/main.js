@@ -1,514 +1,306 @@
-// Subway Runner Mobile — main engine.
-import * as THREE from '../three.module.js';
-import { U, bendPoint, updateCurve } from './curve.js';
-import { BIOMES, lerpColor, CL, CHUNKS, LANE_W, LANES, createWorld, createObstaclePool, acquireObstacle, createCoins, COIN_MAX, createWeather, matTow, matRoad, matTrains } from './world.js';
-import { buildCharacter, animateRun, animateJump, animateRoll } from './player.js';
-import { createSky } from './sky.js';
-import { createFx } from './fx.js';
-import { initAudio, sfx, setAmbience, setAudioEnabled, resumeAudio, setMusicTempo } from './audio.js';
+import * as THREE from 'three';
+import { U } from './curve.js';
+import { loadCity, loadCharacter } from './assets.js';
+import { World, BIOMES, LW } from './world.js';
+import { Player } from './player.js';
+import { Sky } from './sky.js';
+import { Fx } from './fx.js';
+import { Sound } from './audio.js';
 
-// ---------------- QA params ----------------
-const qs = new URLSearchParams(location.search);
-const QA_FPS = qs.has('fps');
-if (QA_FPS) document.body.classList.add('qa');
-const QA_GHOST = qs.has('ghost');
-const QA_BIOME = qs.has('biome') ? parseInt(qs.get('biome')) : null;
-const QA_TOD = qs.has('tod') ? parseFloat(qs.get('tod')) : null;
-let QA_FREEZE = false;
+const $ = (id) => document.getElementById(id);
+const Q = new URLSearchParams(location.search);
+const GHOST = Q.has('ghost');           // ?ghost=1 — без столкновений (для проверки)
+const store = {
+  get: (k, d) => { try { return localStorage.getItem('sc_' + k) ?? d; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem('sc_' + k, v); } catch { /* приватный режим */ } },
+};
+const CHARS = [['rogue', 'Трейсер'], ['knight', 'Рыцарь'], ['mage', 'Маг'], ['barbarian', 'Варвар']];
 
-// ---------------- Renderer ----------------
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
-
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.5;
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-document.body.appendChild(renderer.domElement);
-
+// ---------- рендер ----------
+const canvas = $('c');
+const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: (window.devicePixelRatio || 1) < 2, powerPreference: 'high-performance', stencil: false, alpha: false });
+let resScale = 1;
+renderer.setPixelRatio(baseDpr);
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xbcd8f2, 170, 560);
+const camera = new THREE.PerspectiveCamera(66, 1, 0.4, 700);
+const camPos = new THREE.Vector3(2.4, 2.3, 4.6), camLook = new THREE.Vector3(0, 1.2, -3), _t = new THREE.Vector3(), _l = new THREE.Vector3();
 
-const camera = new THREE.PerspectiveCamera(64, window.innerWidth / window.innerHeight, 0.1, 1200);
-camera.position.set(0, 4.3, 7.4);
+const sound = new Sound();
+let world, player, sky, fx;
+let state = 'load';
+let time = 0, speed = 17, runT = 0, score = 0, coins = 0, shake = 0, invuln = 0, deadT = 0, lastBiome = 0;
+const pw = { magnet: 0, x2: 0, shield: 0 };
+const PW_INFO = { magnet: ['Магнит', '#ff4d6d', 10], x2: ['Очки ×2', '#b56bff', 12], shield: ['Щит', '#3fc1ff', 0] };
+const got = { coins: 0, power: null };
 
-// ---------------- Lights ----------------
-const lights = {};
-lights.hemi = new THREE.HemisphereLight(0xfff0dd, 0xaa8866, 1.2); scene.add(lights.hemi);
-lights.dir = new THREE.DirectionalLight(0xffffee, 1.5);
-lights.dir.position.set(12, 26, 14); lights.dir.castShadow = true;
-lights.dir.shadow.mapSize.set(1024, 1024);
-Object.assign(lights.dir.shadow.camera, { near: 5, far: 90, left: -28, right: 28, top: 30, bottom: -30 });
-lights.dir.shadow.bias = -0.0006;
-scene.add(lights.dir); scene.add(lights.dir.target);
-lights.ambient = new THREE.AmbientLight(0xfff5e0, 0.9); scene.add(lights.ambient);
-lights.player = new THREE.PointLight(0xffe2b0, 0, 18); lights.player.position.set(0, 3.5, 0); scene.add(lights.player);
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setPixelRatio(baseDpr * resScale);
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.fov = w < h ? 72 : 58; camera.updateProjectionMatrix();
+  fx?.setScale(h * baseDpr * resScale);
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 
-const chunks = [];
-for (let i = 0; i < CHUNKS; i++) chunks.push({ grp: null, bL: null, bR: null, userData: {} });
-
-// ---------------- World / sky / fx ----------------
-const sky = createSky(); scene.add(sky.mesh);
-const world = createWorld(scene);
-world.chunks.forEach((c, i) => { chunks[i].grp = c.grp; chunks[i].bL = c.bL; chunks[i].bR = c.bR; });
-const obstacles = createObstaclePool(scene);
-const uTime = { value: 0 };
-const coinsMesh = createCoins(scene, uTime);
-const weather = createWeather(scene, uTime);
-const fx = createFx(scene);
-
-// ---------------- Player ----------------
-const CHARS = [
-    { jacket: 0xf2a51e, pants: 0x2b3a67, cap: 0xe23b3b, pack: 0x35b06f },
-    { jacket: 0x2e6fbf, pants: 0x33383d, cap: 0xf2c94c, pack: 0xe23b3b },
-    { jacket: 0x35b06f, pants: 0x5a4632, cap: 0xffffff, pack: 0x2b3a67 },
-];
-let charIdx = parseInt(localStorage.getItem('sr_char') || '0');
-let player = buildCharacter({ ...CHARS[charIdx], skinIdx: charIdx + 1 });
-scene.add(player.group);
-
-// ---------------- Game state ----------------
-const S = {
-    state: 'menu', // menu | playing | paused | dead
-    dist: 0, speed: 16, lane: 1, laneX: 0, py: 0, vy: 0,
-    jumping: false, rolling: false, rollT: 0, jumpT: 0,
-    coins: 0, score: 0, runTime: 0,
-    biomeIdx: QA_BIOME ?? 0, biomeT: 0,
-    rainAmt: 0, snowAmt: 0, windAmt: 0, thunderT: 4,
-    magnet: 0, megaCoin: 0, invuln: 0,
-};
-const BIOME_LEN = 620; // meters per biome
-let coinRecords = []; // {x,y,z,taken}
-let activeObs = [];    // {o, lane, zStart, len, kind}
-let spawnHorizon = -999;
-
-function resetRun() {
-    S.dist = 0; S.speed = 16; S.lane = 1; S.laneX = 0; S.py = 0; S.vy = 0;
-    S.jumping = S.rolling = false; S.coins = 0; S.score = 0; S.runTime = 0;
-    S.magnet = S.megaCoin = S.invuln = 0; S.thunderT = 4;
-    for (const o of obstacles) { o.mesh.visible = false; o.mesh.position.set(0, -50, 0); }
-    activeObs = []; coinRecords = [];
-    spawnHorizon = -(CHUNKS + 2) * CL; // fresh run: allow slots 1..CHUNKS+1 to regenerate
-    S.biomeIdx = QA_BIOME ?? 0; S.biomeT = 0;
+// ---------- интерфейс ----------
+let toastT = 0;
+function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2200); }
+function show(id, on) { $(id).hidden = !on; }
+function syncMute() { const s = 'Звук: ' + (sound.muted ? 'выкл' : 'вкл'); $('muteBtn').textContent = s; $('pauseMute').textContent = s; }
+function refreshMenu() { $('best').textContent = store.get('best', '0'); $('bank').textContent = store.get('bank', '0'); }
+let hudT = 0, pwKey = '';
+function drawHud(force) {
+  hudT -= 1; if (!force && hudT > 0) return; hudT = 6;
+  $('score').textContent = Math.floor(score);
+  $('coins').textContent = coins;
+  $('mult').textContent = 'x' + (pw.x2 > 0 ? 2 : 1);
+  const key = Object.keys(pw).filter((k) => pw[k] > 0).join();
+  if (key !== pwKey) {
+    pwKey = key;
+    $('powers').innerHTML = Object.keys(pw).filter((k) => pw[k] > 0).map((k) => `<div class="pw"><i style="background:${PW_INFO[k][1]}"></i>${PW_INFO[k][0]}${PW_INFO[k][2] ? `<span class="bar"><b id="pw_${k}"></b></span>` : ''}</div>`).join('');
+  }
+  for (const k of ['magnet', 'x2']) { const el = pw[k] > 0 && $('pw_' + k); if (el) el.style.width = (pw[k] / PW_INFO[k][2]) * 100 + '%'; }
 }
 
-// ---------------- Track generation (slot k spans trackZ [-k*CL, -(k-1)*CL]) ----------------
-function genChunk(k) {
-    const slotFront = -k * CL;
-    // regenerate whenever this slot was skipped by the horizon (e.g. after a fast restart)
-    if (spawnHorizon >= slotFront && k > Math.floor(-spawnHorizon / CL)) { spawnHorizon = slotFront; }
-    else if (spawnHorizon >= slotFront) return;
-    else spawnHorizon = slotFront;
-    const zFront = -k * CL; // far end of the slot
-    const diff = Math.min(1, S.dist / 900);
-    let z = (k === 1 ? -34 : zFront + CL) - 4; // first ~2s of a fresh run stays clear
-    while (z > zFront + 6) {
-        const gap = 15 - diff * 5 + Math.random() * 8;
-        z -= gap;
-        // pick blocked lanes (keep at least one safe lane)
-        const r = Math.random();
-        let blocked = [];
-        if (r < 0.55 + diff * 0.2) blocked = [Math.floor(Math.random() * 3)];
-        else if (r < 0.82) {
-            const a = Math.floor(Math.random() * 3); let b = Math.floor(Math.random() * 3);
-            if (a !== b) blocked = [a, b]; else blocked = [a];
-        }
-        for (const lane of blocked) {
-            const kindR = Math.random();
-            const kind = kindR < 0.45 ? 'train' : (kindR < 0.75 ? 'barrier' : 'ramp');
-            let visCnt = 0; for (const oo of obstacles) if (oo.mesh.visible) visCnt++;
-            const o = acquireObstacle(obstacles, kind);
-            if (!o) continue;
-            o.mesh.position.set(LANES[lane], kind === 'barrier' ? 0.53 : (kind === 'train' ? 1.5 : 0.5), z);
-            if (kind === 'train') o.mesh.material = matTrains[Math.floor(Math.random() * matTrains.length)];
-            activeObs.push({ o, lane, zStart: z, kind });
-        }
-        // coins on a safe lane; sometimes an arc over the obstacle line
-        const safe = [0, 1, 2].filter(l => !blocked.includes(l));
-        if (safe.length && Math.random() < 0.7 && coinRecords.length < 350) {
-            const lane = safe[Math.floor(Math.random() * safe.length)];
-            const n = 4 + Math.floor(Math.random() * 5);
-            const arc = Math.random() < 0.25;
-            for (let i = 0; i < n; i++) {
-                const cz = z + 5 + i * 2.2;
-                const cy = arc ? 1.0 + Math.sin((i / n) * Math.PI) * 1.8 : 0.9;
-                coinRecords.push({ x: LANES[lane], y: cy, z: cz, taken: false });
-            }
-        }
-    }
+function buildChars() {
+  const cur = store.get('char', 'rogue');
+  $('chars').innerHTML = CHARS.map(([id, name]) => `<button data-c="${id}" class="${id === cur ? 'on' : ''}">${name}</button>`).join('');
+  $('chars').addEventListener('click', async (e) => {
+    const b = e.target.closest('button'); if (!b || b.classList.contains('busy')) return;
+    sound.init(); sound.click();
+    b.classList.add('busy');
+    try {
+      await player.setCharacter(b.dataset.c);
+      store.set('char', b.dataset.c);
+      for (const x of $('chars').children) x.classList.toggle('on', x === b);
+      player.play('Cheer', 0.15, true); setTimeout(() => state === 'menu' && player.play('Idle', 0.3), 1500);
+    } catch { toast('Не удалось загрузить персонажа'); }
+    b.classList.remove('busy');
+  });
 }
 
-function recycleChunks() {
-    const baseK = Math.floor(S.dist / CL); // slot the player is inside
-    let maxK = baseK;
-    for (const cc of chunks) if (cc.userData.k !== undefined && cc.userData.k > maxK) maxK = cc.userData.k;
-    for (const c0 of chunks.sort((a, b) => (a.userData.k ?? 0) - (b.userData.k ?? 0))) {
-        const c = c0;
-        let k = c.userData.k;
-        if (k === undefined || k < baseK - 1) {
-            // reclaim: smallest unused slot ahead of the player, keeping coverage contiguous
-            const used = new Set(chunks.map(cc => cc !== c && cc.userData.k !== undefined ? cc.userData.k : -999));
-            let nk = Math.max(baseK, 1);
-            while (used.has(nk)) nk++;
-            k = nk; c.userData.k = k;
-        }
-        // slot k covers trackZ [-k*CL, -(k-1)*CL]; world z = trackZ + dist => [dist-k*CL, dist-(k-1)*CL]
-        c.grp.position.z = S.dist - k * CL;
-        if (k >= 1 && k <= baseK + CHUNKS + 2) genChunk(k);
-        const hL = 8 + ((k * 7919) % 1300) / 100, hR = 8 + ((k * 104729) % 1500) / 100;
-        c.bL.scale.set(1, hL, 1); c.bL.position.y = hL / 2 - 0.5;
-        c.bR.scale.set(1, hR, 1); c.bR.position.y = hR / 2 - 0.5;
-    }
+// ---------- состояния ----------
+function toMenu() {
+  state = 'menu';
+  world.reset(Math.floor(Math.random() * BIOMES.length)); player.reset(); player.root.rotation.y = Math.PI * 0.86;
+  speed = 17; pw.magnet = pw.x2 = pw.shield = 0; player.shieldFx.visible = false;
+  sound.music(false);
+  refreshMenu(); show('menu', true); show('hud', false); show('over', false); show('pause', false);
+}
+function startRun() {
+  sound.init();
+  world.reset(world.startBiome); player.reset(); player.start();
+  state = 'run'; runT = 0; score = 0; coins = 0; speed = 17; invuln = 0; shake = 0; lastBiome = world.startBiome;
+  pw.magnet = pw.x2 = pw.shield = 0; pwKey = '-'; player.shieldFx.visible = false;
+  show('menu', false); show('over', false); show('pause', false); show('hud', true);
+  drawHud(true);
+  sound.music(true);
+}
+function gameOver() {
+  state = 'dead'; deadT = 0; shake = 0.55;
+  player.die(world); sound.crash(); sound.music(false);
+  fx.emit(player.x, player.y + 1, -player.d - 0.6, 26, '#ffd27a', { spread: 6, up: 6, life: 0.7, size: 0.5 });
+  fx.emit(player.x, player.y + 1, -player.d - 0.6, 14, '#ffffff', { spread: 4, up: 4, life: 0.5, size: 0.7 });
+  $('flash').style.transition = 'none'; $('flash').style.opacity = 0.7;
+  requestAnimationFrame(() => { $('flash').style.transition = 'opacity .5s'; $('flash').style.opacity = 0; });
+  navigator.vibrate?.(120);
+}
+function showOver() {
+  const s = Math.floor(score), best = +store.get('best', '0'), isRec = s > best;
+  if (isRec) { store.set('best', s); sound.record(); }
+  store.set('bank', +store.get('bank', '0') + coins);
+  $('oScore').textContent = s; $('oCoins').textContent = coins; $('oDist').textContent = Math.floor(player.d); $('oBest').textContent = Math.max(s, best);
+  show('rec', isRec); show('hud', false); show('over', true);
+}
+function pause(on) {
+  if (on && state === 'run') { state = 'pause'; show('pause', true); sound.music(false); sound.setAmbience(0, 0); }
+  else if (!on && state === 'pause') { state = 'run'; show('pause', false); sound.init(); sound.music(true); last = performance.now(); }
 }
 
-// ---------------- Input ----------------
-const inputQ = [];
-function queue(a) { if (inputQ.length < 6) inputQ.push(a); }
-addEventListener('keydown', (e) => {
-    if (S.state !== 'playing') return;
-    if (e.code === 'ArrowLeft' || e.code === 'KeyA') queue('left');
-    else if (e.code === 'ArrowRight' || e.code === 'KeyD') queue('right');
-    else if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space') queue('jump');
-    else if (e.code === 'ArrowDown' || e.code === 'KeyS') queue('roll');
+// ---------- ввод ----------
+function act(cmd) { if (state === 'run') player.input(cmd, world); }
+let tx = 0, ty = 0, tid = null, used = false;
+canvas.addEventListener('pointerdown', (e) => { tid = e.pointerId; tx = e.clientX; ty = e.clientY; used = false; });
+window.addEventListener('pointermove', (e) => {
+  if (e.pointerId !== tid || used) return;
+  const dx = e.clientX - tx, dy = e.clientY - ty, th = 22;
+  if (Math.abs(dx) < th && Math.abs(dy) < th) return;
+  used = true;
+  if (Math.abs(dx) > Math.abs(dy)) act(dx > 0 ? 'R' : 'L'); else act(dy > 0 ? 'D' : 'U');
 });
-
-let tStart = null;
-addEventListener('touchstart', (e) => { tStart = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }, { passive: true });
-addEventListener('touchend', (e) => {
-    if (!tStart || S.state !== 'playing') return;
-    const dx = e.changedTouches[0].clientX - tStart.x, dy = e.changedTouches[0].clientY - tStart.y;
-    const adx = Math.abs(dx), ady = Math.abs(dy);
-    if (Math.max(adx, ady) < 24) return;
-    if (adx > ady) queue(dx > 0 ? 'right' : 'left');
-    else queue(dy < 0 ? 'jump' : 'roll');
-    tStart = null;
-}, { passive: true });
-
-function processInput() {
-    while (inputQ.length) {
-        const a = inputQ.pop();
-        if (a === 'left' && S.lane > 0) { S.lane--; sfx.lane(); }
-        else if (a === 'right' && S.lane < 2) { S.lane++; sfx.lane(); }
-        else if (a === 'jump' && !S.jumping && !S.rolling) { S.jumping = true; S.vy = 11.5; S.jumpT = 0; sfx.jump(); }
-        else if (a === 'roll') {
-            if (S.jumping) S.vy = -16; // fast-fall into roll
-            S.rolling = true; S.rollT = 0; sfx.roll(); fx.dust(S.laneX, 0.2, 0);
-        }
-    }
-}
-
-// ---------------- Physics (fixed 1/120) ----------------
-const FIXED = 1 / 120;
-function physics(dt) {
-    if (S.state !== 'playing') return;
-    if (!QA_FREEZE) {
-        S.runTime += dt;
-        S.speed = Math.min(42, 16 + S.runTime * 0.35);
-        S.dist += S.speed * dt;
-    } else S.speed = 0;
-
-    const targetX = LANES[S.lane];
-    S.laneX += (targetX - S.laneX) * Math.min(1, dt * 14);
-
-    if (S.jumping || S.py > 0) {
-        S.vy -= 30 * dt;
-        S.py += S.vy * dt;
-        S.jumpT += dt;
-        if (S.py <= 0) { S.py = 0; S.vy = 0; S.jumping = false; fx.dust(S.laneX, 0.15, 0); }
-    }
-    if (S.rolling) { S.rollT += dt; if (S.rollT > 0.6) S.rolling = false; }
-
-    S.biomeT += S.speed * dt;
-    if (S.biomeT >= BIOME_LEN) { S.biomeT = 0; S.biomeIdx = (S.biomeIdx + 1) % BIOMES.length; }
-
-    if (S.magnet > 0) S.magnet -= dt;
-    if (S.megaCoin > 0) S.megaCoin -= dt;
-    if (S.invuln > 0) S.invuln -= dt;
-
-    recycleChunks();
-
-    // coin pickup + magnet
-    const magOn = S.magnet > 0;
-    for (const c of coinRecords) {
-        if (c.taken) continue;
-        const wz = c.z + S.dist;
-        if (wz < -60 || wz > 10) continue;
-        if (magOn && Math.abs(c.x - S.laneX) < 2.6 && wz > -26) c.x += (S.laneX - c.x) * 0.18;
-        const dx = Math.abs(c.x - S.laneX);
-        const dy = Math.abs(c.y - (S.py + 0.9));
-        if (dx < 0.85 && dy < 1.05 && wz > -3.5 && wz < 2) {
-            c.taken = true;
-            S.coins += S.megaCoin > 0 ? 5 : 1;
-            sfx.coin(); fx.sparkle(c.x, c.y, wz);
-        }
-    }
-    if (coinRecords.length > 400) coinRecords = coinRecords.filter(c => !c.taken && c.z + S.dist > -20 && c.z + S.dist < 140);
-
-    // obstacle recycling: release anything fully behind the player (pool stays free)
-    for (let i = activeObs.length - 1; i >= 0; i--) {
-        const a = activeObs[i];
-        if (a.zStart + S.dist > 14) {
-            a.o.mesh.visible = false; a.o.mesh.position.set(0, -50, 0); activeObs.splice(i, 1);
-        }
-    }
-
-    // obstacle collision
-    if (!QA_GHOST && S.invuln <= 0) {
-        for (const a of activeObs) {
-            const wz = a.zStart + S.dist;
-            if (wz > 2 || wz < -12) continue;
-            if (Math.abs(LANES[a.lane] - S.laneX) > 1.35) continue;
-            if (a.kind === 'ramp') {
-                if (wz > -2 && wz < 1.6 && S.py < 0.4) return die();
-                continue;
-            }
-            const top = a.kind === 'train' ? 3.0 : 1.05;
-            if (S.py > top - 0.15) continue; // jumped over
-            if (a.kind === 'barrier' && S.rolling && wz > -2.4) continue; // roll clears low barrier
-            return die();
-        }
-    }
-    if (activeObs.length > 0) {
-        const a0 = activeObs[0];
-    }
-    for (let i = activeObs.length - 1; i >= 0; i--) {
-        const a = activeObs[i];
-        if (a.zStart + S.dist > 24) {
-            a.o.mesh.visible = false;
-            activeObs.splice(i, 1);
-        }
-    }
-
-    // storm thunder
-    const b = BIOMES[S.biomeIdx];
-    if (b.weather === 'storm') {
-        S.thunderT -= dt;
-        if (S.thunderT <= 0) { S.thunderT = 3 + Math.random() * 6; fx.lightning(lights.player); sfx.thunder(); }
-    }
-
-    S.score = Math.floor(S.dist) + S.coins * 10;
-}
-
-function die() {
-    S.state = 'dead';
-    sfx.crash();
-    fx.burst(S.laneX, 1.2, 0, 0xff6644, 14);
-    document.getElementById('gameover').style.display = 'flex';
-    document.getElementById('finalScore').textContent = `Рахунок: ${S.score} • Монети: ${S.coins}`;
-    const best = Math.max(parseInt(localStorage.getItem('sr_best') || '0'), S.score);
-    localStorage.setItem('sr_best', String(best));
-    document.getElementById('bestScore').textContent = `Рекорд: ${best}`;
-}
-
-// ---------------- Biome / day-night / weather ----------------
-const lampDay = new THREE.Color(0x8a949e), lampNight = new THREE.Color(0xfff2c0);
-function updateEnvironment(dt) {
-    const cur = BIOMES[S.biomeIdx];
-    const nxt = BIOMES[(S.biomeIdx + 1) % BIOMES.length];
-    const t = Math.min(1, S.biomeT / BIOME_LEN);
-
-    const skyBot = lerpColor(cur.skyBot, nxt.skyBot, t);
-    const fogC = lerpColor(cur.fog, nxt.fog, t);
-    scene.background = skyBot;
-    scene.fog.color.copy(fogC);
-    scene.fog.near = THREE.MathUtils.lerp(cur.fogNear, nxt.fogNear, t);
-    scene.fog.far = THREE.MathUtils.lerp(cur.fogFar, nxt.fogFar, t);
-
-    let tod = THREE.MathUtils.lerp(cur.tod, nxt.tod, t);
-    if (QA_TOD !== null) tod = QA_TOD;
-    const night = 1 - tod;
-    sky.uniforms.uDay.value = tod;
-    sky.uniforms.uNight.value = night;
-    sky.uniforms.uSkyTop.value.copy(lerpColor(cur.skyTop, nxt.skyTop, t));
-    sky.uniforms.uSkyBot.value.copy(skyBot);
-    const ang = tod * Math.PI;
-    sky.uniforms.uSunDir.value.set(Math.cos(ang) * 0.6, Math.sin(ang), -0.7).normalize();
-
-    lights.hemi.intensity = Math.max(1.2, 0.4 + tod * 0.6);
-    lights.hemi.color.copy(lerpColor(0x777788, 0xfff0dd, tod));
-    lights.dir.intensity = Math.max(1.5, 0.5 + tod * 1.0);
-    lights.dir.color.copy(lerpColor(0x8899bb, 0xffffee, tod));
-    lights.ambient.intensity = Math.max(0.8, 0.25 + tod * 0.4);
-    lights.player.intensity = night * 10;
-    lights.player.position.set(S.laneX, S.py + 3.2, -2);
-
-    renderer.toneMappingExposure = THREE.MathUtils.lerp(1.7, 1.35, tod);
-    matTow.emissiveIntensity = night * 1.15;
-    matRoad.emissive.copy(fogC).multiplyScalar(night * 0.12);
-    world.lampHeads.forEach(h => { h.visible = night > 0.35; });
-
-    const wantRain = (cur.weather === 'rain' ? 1 : 0) * (1 - t) + (nxt.weather === 'rain' ? 1 : 0) * t;
-    const wantSnow = (cur.weather === 'snow' ? 1 : 0) * (1 - t) + (nxt.weather === 'snow' ? 1 : 0) * t;
-    const wantStorm = (cur.weather === 'storm' ? 1 : 0) * (1 - t) + (nxt.weather === 'storm' ? 1 : 0) * t;
-    S.rainAmt += ((wantRain + wantStorm * 1.4) - S.rainAmt) * dt * 0.8;
-    S.snowAmt += (wantSnow - S.snowAmt) * dt * 0.8;
-    S.windAmt += (wantStorm - S.windAmt) * dt * 0.5;
-
-    weather.rain.pts.visible = S.rainAmt > 0.02;
-    weather.rain.mat.uniforms.uAmt.value = Math.min(1, S.rainAmt);
-    weather.snow.pts.visible = S.snowAmt > 0.02;
-    weather.snow.mat.uniforms.uAmt.value = Math.min(1, S.snowAmt);
-    weather.rain.mat.uniforms.uCamY.value = camera.position.y;
-    weather.snow.mat.uniforms.uCamY.value = camera.position.y;
-    setAmbience(S.rainAmt, S.windAmt);
-}
-
-// ---------------- Camera ----------------
-function updateCamera() {
-    camera.position.copy(bendPoint(S.laneX * 0.72, 4.3 + S.py * 0.62, 7.4));
-    const lk = bendPoint(S.laneX * 0.86, 1.5 + S.py * 0.62, -9);
-    camera.lookAt(lk);
-    lights.dir.target.position.set(S.laneX, 0, -10);
-}
-
-// ---------------- Coins instancing ----------------
-const dummy = new THREE.Object3D();
-function updateCoins() {
-    let n = 0;
-    for (const c of coinRecords) {
-        if (c.taken || n >= COIN_MAX) continue;
-        const wz = c.z + S.dist;
-        if (wz < -90 || wz > 12) continue;
-        dummy.position.set(c.x, c.y, wz);
-        dummy.scale.setScalar(1);
-        dummy.updateMatrix();
-        coinsMesh.setMatrixAt(n++, dummy.matrix);
-    }
-    dummy.position.set(0, -50, 0); dummy.scale.setScalar(0.0001); dummy.updateMatrix();
-    for (let i = n; i < COIN_MAX; i++) coinsMesh.setMatrixAt(i, dummy.matrix);
-    coinsMesh.instanceMatrix.needsUpdate = true;
-}
-
-// ---------------- Dynamic resolution ----------------
-let resScale = 1, fpsAcc = 0, fpsN = 0, fpsShown = 0;
-function tuneResolution(dt) {
-    fpsAcc += dt; fpsN++;
-    if (fpsAcc >= 0.5) {
-        const fps = fpsN / fpsAcc;
-        fpsShown = Math.round(fps);
-        if (fps > 100) resScale = Math.min(1, resScale + 0.05);
-        else if (fps < 55) resScale = Math.max(0.62, resScale - 0.06);
-        if (fps < 40) resScale = 0.62;
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * resScale);
-        fpsAcc = 0; fpsN = 0;
-    }
-}
-
-// ---------------- HUD ----------------
-const hud = { score: document.getElementById('score'), coins: document.getElementById('coins'), biome: document.getElementById('biome'), fps: document.getElementById('fps') };
-function updateHUD() {
-    hud.score.textContent = S.score;
-    hud.coins.textContent = S.coins;
-    hud.biome.textContent = BIOMES[S.biomeIdx].name;
-    if (QA_FPS) hud.fps.textContent = fpsShown;
-}
-
-// ---------------- Main loop ----------------
-let lastT = performance.now(), acc = 0;
-function animate(time) {
-    requestAnimationFrame(animate);
-    const dt = Math.min((time - lastT) / 1000, 0.05);
-    lastT = time;
-    uTime.value += dt;
-
-    if (S.state === 'playing') {
-        if (!QA_FREEZE) {
-            acc += dt;
-            let steps = 0;
-            while (acc >= FIXED && steps < 12) { physics(FIXED); acc -= FIXED; steps++; }
-            processInput();
-        }
-        updateCurve(S.dist);
-        const speedNorm = (S.speed - 16) / 26;
-        if (S.rolling) { animateRoll(player, S.rollT / 0.6); player.group.rotation.x = -Math.sin((S.rollT / 0.6) * Math.PI) * 1.1; }
-        else if (S.jumping || S.py > 0) { animateJump(player, Math.min(1, S.jumpT / 0.7)); player.group.rotation.x = 0; }
-        else { animateRun(player, time * 0.012 * (0.8 + speedNorm), speedNorm); player.group.rotation.x = 0; }
-        player.group.position.set(S.laneX, S.py, 0);
-    } else {
-        animateRun(player, time * 0.008, 0.2);
-        player.group.position.set(0, 0, 0);
-        updateCurve(time * 0.01);
-    }
-
-    updateEnvironment(dt);
-    updateCamera();
-    updateCoins();
-    fx.update(dt);
-    renderer.render(scene, camera);
-    updateHUD();
-    tuneResolution(dt);
-}
-requestAnimationFrame(animate);
-
-// ---------------- UI wiring ----------------
-function startGame() {
-    initAudio(); resumeAudio();
-    resetRun();
-    S.state = 'playing';
-    lastT = performance.now(); acc = 0;
-    document.getElementById('menu').style.display = 'none';
-    document.getElementById('gameover').style.display = 'none';
-    document.getElementById('pauseOverlay').style.display = 'none';
-    document.getElementById('hud').style.display = 'flex';
-}
-document.getElementById('startBtn').addEventListener('click', startGame);
-document.getElementById('retryBtn').addEventListener('click', startGame);
-document.getElementById('pauseBtn').addEventListener('click', () => {
-    if (S.state === 'playing') { S.state = 'paused'; document.getElementById('pauseOverlay').style.display = 'flex'; }
+window.addEventListener('pointerup', (e) => { if (e.pointerId === tid) tid = null; });
+window.addEventListener('pointercancel', () => { tid = null; });
+document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  const k = e.code;
+  if (k === 'ArrowLeft' || k === 'KeyA') act('L');
+  else if (k === 'ArrowRight' || k === 'KeyD') act('R');
+  else if (k === 'ArrowUp' || k === 'KeyW' || k === 'Space') { if (state === 'menu' && k === 'Space') startRun(); else if (state === 'dead' && deadT > 1.3 && k === 'Space') startRun(); else act('U'); }
+  else if (k === 'ArrowDown' || k === 'KeyS') act('D');
+  else if (k === 'Escape' || k === 'KeyP') pause(state === 'run');
+  else return;
+  e.preventDefault();
 });
-document.getElementById('resumeBtn').addEventListener('click', () => {
-    S.state = 'playing'; lastT = performance.now(); acc = 0;
-    document.getElementById('pauseOverlay').style.display = 'none';
-});
-const muteBtn = document.getElementById('muteBtn');
-if (localStorage.getItem('sr_mute') === '1') { muteBtn.textContent = '🔇'; }
-muteBtn.addEventListener('click', () => {
-    const muted = localStorage.getItem('sr_mute') === '1';
-    localStorage.setItem('sr_mute', muted ? '0' : '1');
-    setAudioEnabled(muted); // if it WAS muted, now enable
-    muteBtn.textContent = muted ? '🔊' : '🔇';
-});
+document.addEventListener('visibilitychange', () => { if (document.hidden) pause(true); });
 
-document.querySelectorAll('.charBtn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-        charIdx = parseInt(btn.dataset.i);
-        localStorage.setItem('sr_char', String(charIdx));
-        scene.remove(player.group);
-        player = buildCharacter({ ...CHARS[charIdx], skinIdx: charIdx + 1 });
-        scene.add(player.group);
-        document.querySelectorAll('.charBtn').forEach(b => b.classList.toggle('sel', b === btn));
-    });
-});
+$('playBtn').onclick = startRun;
+$('againBtn').onclick = startRun;
+$('menuBtn').onclick = () => { sound.click(); toMenu(); };
+$('quitBtn').onclick = () => { sound.click(); toMenu(); };
+$('pauseBtn').onclick = () => pause(true);
+$('resumeBtn').onclick = () => pause(false);
+const toggleMute = () => { sound.init(); sound.setMuted(!sound.muted); syncMute(); };
+$('muteBtn').onclick = toggleMute; $('pauseMute').onclick = toggleMute;
+let showFps = Q.has('fps') || store.get('fps', '0') === '1';
+$('fpsToggle').onclick = () => { showFps = !showFps; store.set('fps', showFps ? '1' : '0'); show('fps', showFps); };
 
-addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.fov = window.innerHeight > window.innerWidth ? 72 : 58;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-});
-camera.fov = window.innerHeight > window.innerWidth ? 72 : 58;
-camera.updateProjectionMatrix();
+// ---------- плавность: динамическое разрешение под частоту экрана ----------
+const perf = { ema: 8, target: 0, samples: [], acc: 0, good: 0, frames: 0, fpsT: 0 };
+function perfTick(ms) {
+  if (ms > 250) return;
+  perf.ema += (ms - perf.ema) * 0.06;
+  if (perf.samples.length < 90) {
+    perf.samples.push(ms);
+    if (perf.samples.length === 90) { // частота экрана — по быстрым кадрам
+      const s = [...perf.samples].sort((a, b) => a - b), q = s[18];
+      perf.target = [240, 165, 144, 120, 90, 60].map((hz) => 1000 / hz).reduce((b, v) => (Math.abs(v - q) < Math.abs(b - q) ? v : b));
+    }
+    return;
+  }
+  perf.acc += ms;
+  if (perf.acc > 900) {
+    perf.acc = 0;
+    if (perf.ema > perf.target * 1.3 && resScale > 0.5) { resScale = Math.max(0.5, resScale - 0.1); perf.good = 0; resize(); }
+    else if (perf.ema < perf.target * 1.1 && resScale < 1) { if (++perf.good >= 5) { resScale = Math.min(1, resScale + 0.05); perf.good = 0; resize(); } }
+    else perf.good = 0;
+  }
+  perf.frames++; perf.fpsT += ms;
+  if (perf.fpsT > 500) {
+    if (showFps) $('fps').textContent = `${Math.round((perf.frames * 1000) / perf.fpsT)} fps · экран ${Math.round(1000 / perf.target)} Гц · ${Math.round(resScale * 100)}% · ${renderer.info.render.calls} dc`;
+    perf.frames = 0; perf.fpsT = 0;
+  }
+}
 
-// ---------------- QA API ----------------
-window.gameApi = {
-    state: () => S.state,
-    fps: () => fpsShown,
-    dist: () => Math.round(S.dist),
-    advance: (m) => { S.dist += m; recycleChunks(); },
-    diag: () => ({ spawnHorizon, chunkKs: chunks.map(c => c.userData.k), obsLen: activeObs.length, coinLen: coinRecords.length }),
-    start: startGame,
-    setBiome: (i) => { S.biomeIdx = i % BIOMES.length; S.biomeT = 0; },
-    freeze: (v) => { QA_FREEZE = !!v; },
-    input: (a) => queue(a),
-    lamps: () => world.lampHeads.map(h => h.visible),
-    sceneInfo: () => ({
-        fogNear: scene.fog.near, fogFar: scene.fog.far,
-        curve: { x: U.uCurve.value.x, y: U.uCurve.value.y },
-        tod: sky.uniforms.uDay.value,
-        obs: activeObs.length, coins: coinRecords.length,
-        camPos: [camera.position.x.toFixed(1), camera.position.y.toFixed(1), camera.position.z.toFixed(1)],
-    }),
-};
-window.gameApi.renderNow = () => { renderer.render(scene, camera); return 'rendered'; };
+// ---------- кадр ----------
+let last = performance.now();
+function step(dt) { // один шаг физики забега
+  runT += dt;
+  speed = 17 + Math.min(17, runT * 0.09);
+  player.update(dt, world, speed);
+  for (const k of ['magnet', 'x2']) if (pw[k] > 0) pw[k] = Math.max(0, pw[k] - dt);
+  invuln -= dt;
+  score += speed * dt * (pw.x2 > 0 ? 2 : 1);
+
+  world.collect(player.x, player.y, player.d, pw.magnet > 0, dt, got);
+  if (got.coins) {
+    coins += got.coins; score += got.coins * 10 * (pw.x2 > 0 ? 2 : 1);
+    sound.coin(); fx.emit(player.x, player.y + 1.1, -player.d - 0.8, 5, '#ffe066', { spread: 2.2, up: 3, life: 0.35, size: 0.3, vz: -speed * 0.8 });
+  }
+  if (got.power) {
+    const p = got.power; pw[p] = PW_INFO[p][2] || 1; sound.power(); toast(PW_INFO[p][0]);
+    fx.emit(player.x, player.y + 1.1, -player.d - 0.8, 18, PW_INFO[p][1], { spread: 4, up: 4, life: 0.6, size: 0.45, vz: -speed * 0.8 });
+    player.shieldFx.visible = pw.shield > 0;
+  }
+  const o = !GHOST && invuln <= 0 && world.hit(player.x, player.d, player.y, player.rolling);
+  if (o) {
+    if (pw.shield > 0) {
+      pw.shield = 0; player.shieldFx.visible = false; invuln = 0.7; shake = 0.3; sound.shield(); navigator.vibrate?.(40);
+      fx.emit(o.x, 1.2, -o.d, 24, '#9fe0ff', { spread: 7, up: 7, life: 0.7, size: 0.55 });
+      world.knock(o);
+    } else gameOver();
+  }
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const raw = now - last; last = now;
+  perfTick(raw);
+  if (state === 'pause' || state === 'load') return;
+  const dt = Math.min(0.1, raw / 1000);
+  time += dt; U.uTime.value = time;
+
+  if (state === 'run') {
+    const n = Math.max(1, Math.ceil(dt / 0.011));
+    for (let i = 0; i < n && state === 'run'; i++) step(dt / n);
+    for (const ev of player.events) {
+      if (ev === 'jump') sound.jump();
+      else if (ev === 'roll') sound.roll();
+      else if (ev === 'swipe') sound.swipe();
+      else if (ev === 'bump') { sound.bump(); shake = Math.max(shake, 0.18); }
+      else if (ev === 'land') { sound.land(); fx.emit(player.x, player.y + 0.1, -player.d, 6, '#d9d2c4', { spread: 2.5, up: 1.2, grav: -2, life: 0.4, size: 0.5, vz: -speed * 0.6 }); }
+    }
+    player.events.length = 0;
+    const b = world.biomeNow(player.d + 60);
+    if (b !== lastBiome) { lastBiome = b; toast('Район: ' + BIOMES[b]); }
+    drawHud(false);
+  } else {
+    player.update(dt, world, 0);
+    if (state === 'dead') { deadT += dt; if (deadT > 1.25 && $('over').hidden) showOver(); }
+  }
+  world.update(dt, player.d, speed, time, sky.night);
+
+  // изгиб трассы: медленно меняется с дистанцией — поворот то влево, то вправо
+  const d = player.d;
+  U.uCurve.value.set((Math.sin(d * 0.0052) * 0.65 + Math.sin(d * 0.0021 + 1.7) * 0.35) * 0.0015, -0.00085 + 0.0003 * Math.sin(d * 0.0031));
+
+  // камера
+  if (state === 'menu') {
+    _t.set(Math.sin(time * 0.25) * 0.7, 2.0, 5.6); _l.set(0, 0.35, 0);
+    camPos.lerp(_t, Math.min(1, dt * 3)); camLook.lerp(_l, Math.min(1, dt * 3));
+  } else {
+    const py = player.y;
+    _t.set(player.x * 0.72, 4.3 + py * 0.62, -d + 7.4); _l.set(player.x * 0.86, 1.5 + py * 0.62, -d - 9);
+    const kx = Math.min(1, dt * 9), ky = Math.min(1, dt * 5);
+    camPos.x += (_t.x - camPos.x) * kx; camPos.y += (_t.y - camPos.y) * ky; camPos.z += (_t.z - camPos.z) * Math.min(1, dt * 14);
+    camLook.x += (_l.x - camLook.x) * kx; camLook.y += (_l.y - camLook.y) * ky; camLook.z += (_l.z - camLook.z) * Math.min(1, dt * 14);
+  }
+  camera.position.copy(camPos);
+  if (shake > 0) { shake = Math.max(0, shake - dt); camera.position.x += (Math.random() - 0.5) * shake * 1.2; camera.position.y += (Math.random() - 0.5) * shake * 1.2; }
+  camera.lookAt(camLook);
+
+  const fl = sky.update(dt, camera, state === 'run' ? speed : 0, time, state === 'run');
+  if (state === 'run') sound.setAmbience(sky.w.rain, Math.max(sky.w.snow * 0.8, sky.w.rain * 0.5) + 0.12);
+  if (fl > 0.05) $('flash').style.opacity = Math.min(0.35, fl * 0.25); else if (state !== 'dead' && $('flash').style.opacity !== '0') $('flash').style.opacity = 0;
+  if (player.shieldFx.visible) { player.shieldFx.rotation.y = time * 2; player.shieldFx.material.opacity = 0.22 + 0.08 * Math.sin(time * 6); }
+  fx.update(dt);
+  renderer.render(scene, camera);
+}
+
+// ---------- запуск ----------
+async function boot() {
+  resize();
+  try {
+    const bar = $('lbar');
+    const charName = store.get('char', 'rogue');
+    const [city] = await Promise.all([
+      loadCity((e) => { if (e.total) bar.style.width = 10 + (e.loaded / e.total) * 40 + '%'; }),
+      loadCharacter(charName, (e) => { if (e.total) bar.style.width = 50 + (e.loaded / e.total) * 40 + '%'; }),
+    ]);
+    world = new World(scene, city.kit, city.tex);
+    player = new Player(scene);
+    sky = new Sky(scene, renderer);
+    fx = new Fx(scene);
+    sky.onThunder = () => sound.thunder();
+    sky.onWeather = (n) => { if (state === 'run') toast('Погода: ' + n); };
+    if (Q.has('weather')) sky.setWeather(Q.get('weather'), true);
+    if (Q.has('tod')) sky.tod = +Q.get('tod');
+    await player.setCharacter(charName);
+    bar.style.width = '100%';
+    buildChars(); syncMute(); show('fps', showFps); resize();
+    toMenu();
+    if (Q.has('biome')) world.reset(+Q.get('biome'));
+    camera.position.copy(camPos);
+    renderer.compile(scene, camera);
+    show('loading', false);
+    window.__dbg = { world, player, sky, sound, renderer, scene, camera, get state() { return state; }, start: startRun, act, pw, get speed() { return speed; } };
+    requestAnimationFrame((t) => { last = t; frame(t); });
+  } catch (err) {
+    console.error(err);
+    $('lerr').textContent = 'Не удалось загрузить игру: ' + (err?.message || err);
+  }
+}
+boot();

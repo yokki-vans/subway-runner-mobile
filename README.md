@@ -1,18 +1,28 @@
-# Subway Runner 3D (mobile)
+# Sprint City 3D
 
-Endless runner in the spirit of Subway Surfers: Three.js, mobile-first, no external assets.
+Бесконечный 3D-раннер: three.js r170, изогнутый мир, районы, день/ночь, погода, до 120 fps.
 
-- Radial track bend via vertex shader (`uCurve * z^2`) — smooth "running around the corner" feel, no corners; gameplay axis stays straight.
-- 6 biomes with day/night and weather: DAY_CITY → SUNSET → NIGHT_CITY → RAIN → STORM → SNOW_DAY.
-- Procedural everything: Canvas textures (asphalt/rails/bricks/trains), WebAudio music + rain/wind/SFX, low-poly character rig with run/jump/roll animations, particle FX.
-- 120 FPS target: fixed-step physics (1/120) + dynamic resolution scaling.
-- Controls: swipe left/right/up/down; WASD/arrows/Space on desktop.
+**Играть:** <https://yokki-vans.github.io/subway-runner-mobile/>
 
-## Run
-Serve the directory statically and open `index.html` (e.g. `python3 -m http.server`).
+- **Изогнутый мир** — трасса плавно уходит за поворот и за горизонт (радиальный изгиб в вершинном шейдере, без углов).
+- **Районы**: Центр, Парк, Порт, Мост — сменяют друг друга.
+- **День и ночь**: рассвет, день, закат, ночь со звёздами, луной, фонарями и светящимися окнами.
+- **Погода**: ясно, облачно, дождь, гроза с молниями, снег (ложится на крыши и дорогу), туман.
+- **Персонажи** со скелетной анимацией: бег, прыжок, перекат, падение (4 персонажа).
+- **Звук** целиком синтезируется через WebAudio: музыка, эффекты, дождь, гром.
+- **Плавность**: кадры идут с частотой экрана (до 120 Гц и выше), разрешение автоматически подстраивается.
 
-## QA API
-`window.gameApi`: `start()`, `advance(m)`, `freeze(v)`, `input('left'|'right'|'jump'|'roll')`, `setBiome(i)`, `sceneInfo()`.
-Query params: `?fps=1` (FPS readout), `?ghost=1`.
+## Запуск локально
+Сборка не нужна — подойдёт любой статический сервер:
 
-MIT-style; all assets generated at runtime.
+```
+python3 -m http.server 8137
+```
+
+Параметры адреса для проверки: `?fps=1` — счётчик кадров, `?ghost=1` — без столкновений, `?biome=0..3`, `?weather=clear|cloudy|rain|storm|snow|fog`, `?tod=0..1` — время суток. QA из консоли: `window.__dbg` (world/player/sky/sound/renderer, start(), act()).
+
+## Технологии и ассеты
+- [three.js](https://threejs.org/) r170 (MIT), без сборщика.
+- 3D-модели и текстуры: **KayKit Adventurers** и **KayKit City Builder Bits** — Kay Lousberg, [kaylousberg.com](https://www.kaylousberg.com), лицензия CC0.
+- Трамваи, барьеры, деревья, мост, порт и небо построены процедурно в коде.
+

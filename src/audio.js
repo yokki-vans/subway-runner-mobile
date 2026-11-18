@@ -1,128 +1,112 @@
-// Procedural WebAudio: music sequencer, SFX, weather ambience. No assets.
-let ctx = null, master = null, musicGain = null, sfxGain = null, ambGain = null;
-let musicTimer = null, step = 0;
-let rainSrc = null, windSrc = null;
-let enabled = true;
-
-function makeNoiseBuffer(c) {
-    const len = c.sampleRate * 2;
-    const buf = c.createBuffer(1, len, c.sampleRate);
-    const d = buf.getChannelData(0);
+// Весь звук синтезируется через WebAudio: эффекты, шум дождя, гром, музыка.
+export class Sound {
+  constructor() {
+    this.ctx = null;
+    this.muted = localStorage.getItem('sc_mute') === '1';
+    this.musicOn = false; this.step = 0; this.nextT = 0; this.combo = 0; this.comboT = 0;
+  }
+  init() {
+    if (this.ctx) { if (this.ctx.state !== 'running') this.ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const c = this.ctx = new AC();
+    this.master = c.createGain(); this.master.gain.value = this.muted ? 0 : 0.9;
+    const comp = c.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 6;
+    this.master.connect(comp); comp.connect(c.destination);
+    this.sfx = c.createGain(); this.sfx.gain.value = 0.8; this.sfx.connect(this.master);
+    this.mus = c.createGain(); this.mus.gain.value = 0.0; this.mus.connect(this.master);
+    // буфер белого шума
+    const len = c.sampleRate * 2, buf = c.createBuffer(1, len, c.sampleRate), d = buf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-    return buf;
-}
-
-export function initAudio() {
-    if (ctx) return;
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
-    master = ctx.createDynamicsCompressor();
-    master.threshold.value = -14; master.ratio.value = 6;
-    master.connect(ctx.destination);
-    musicGain = ctx.createGain(); musicGain.gain.value = 0.22; musicGain.connect(master);
-    sfxGain = ctx.createGain(); sfxGain.gain.value = 0.55; sfxGain.connect(master);
-    ambGain = ctx.createGain(); ambGain.gain.value = 0.0; ambGain.connect(master);
-
-    // Rain loop: filtered noise
-    const noise = makeNoiseBuffer(ctx);
-    rainSrc = ctx.createBufferSource(); rainSrc.buffer = noise; rainSrc.loop = true;
-    const rf = ctx.createBiquadFilter(); rf.type = 'bandpass'; rf.frequency.value = 3000; rf.Q.value = 0.6;
-    const rg = ctx.createGain(); rg.gain.value = 1;
-    rainSrc.connect(rf); rf.connect(rg); rg.connect(ambGain); rainSrc.start();
-
-    // Wind loop: low-passed noise
-    windSrc = ctx.createBufferSource(); windSrc.buffer = noise; windSrc.loop = true;
-    const wf = ctx.createBiquadFilter(); wf.type = 'lowpass'; wf.frequency.value = 350;
-    const wg = ctx.createGain(); wg.gain.value = 0.6;
-    windSrc.connect(wf); wf.connect(wg); wg.connect(ambGain); windSrc.start();
-
-    startMusic();
-}
-
-export function setAudioEnabled(on) {
-    enabled = on;
-    if (master) master.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.05);
-}
-
-export function resumeAudio() { if (ctx && ctx.state === 'suspended') ctx.resume(); }
-
-// ---- SFX ----
-function tone(freq, dur, type = 'square', vol = 0.3, slide = 0) {
-    if (!ctx || !enabled) return;
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = type; o.frequency.value = freq;
-    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), ctx.currentTime + dur);
-    g.gain.setValueAtTime(vol, ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
-    o.connect(g); g.connect(sfxGain);
-    o.start(); o.stop(ctx.currentTime + dur + 0.02);
-}
-
-function noiseBurst(dur = 0.25, freq = 800, vol = 0.4) {
-    if (!ctx || !enabled) return;
-    const s = ctx.createBufferSource(); s.buffer = makeNoiseBuffer(ctx);
-    const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 1;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(vol, ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
-    s.connect(f); f.connect(g); g.connect(sfxGain);
-    s.start(); s.stop(ctx.currentTime + dur);
-}
-
-export const sfx = {
-    coin() { tone(880, 0.09, 'square', 0.22); setTimeout(() => tone(1320, 0.12, 'square', 0.2), 60); },
-    jump() { tone(300, 0.18, 'sine', 0.35, 500); },
-    roll() { noiseBurst(0.22, 400, 0.3); },
-    crash() { noiseBurst(0.5, 250, 0.6); tone(90, 0.5, 'sawtooth', 0.4, -40); },
-    lane() { tone(520, 0.06, 'triangle', 0.18); },
-    powerup() { [660, 880, 1100, 1320].forEach((f, i) => setTimeout(() => tone(f, 0.14, 'square', 0.25), i * 90)); },
-    thunder() { noiseBurst(1.2, 120, 0.7); },
-    swoosh() { noiseBurst(0.15, 1600, 0.18); },
-};
-
-// ---- Weather ambience mix ----
-export function setAmbience(rainAmt, windAmt) {
-    if (!ctx) return;
-    ambGain.gain.setTargetAtTime(Math.min(0.5, rainAmt * 0.35 + windAmt * 0.12), ctx.currentTime, 0.4);
-}
-
-// ---- Music: 16-step sequencer, tempo follows speed ----
-const BASS = [55, 55, 82.4, 55, 73.4, 55, 65.4, 82.4]; // A1 pattern
-const LEAD = [440, 523, 659, 523, 587, 440, 659, 784, 659, 523, 440, 587, 523, 659, 880, 784];
-
-export function startMusic() {
-    if (!ctx || musicTimer) return;
-    let speedMul = 1;
-    const tick = () => {
-        if (enabled) {
-            const s = step % 16;
-            // bass every 2 steps
-            if (s % 2 === 0) tone(BASS[(step / 2) % 8] * 2, 0.16, 'triangle', 0.25);
-            // lead every step
-            tone(LEAD[s], 0.11, 'square', 0.09);
-            // hat on odd steps
-            if (s % 2 === 1) noiseBurst(0.04, 6000, 0.05);
-        }
-        step++;
+    this.noiseBuf = buf;
+    // постоянный шум дождя и ветра
+    const mkLoop = (type, f, q) => {
+      const s = c.createBufferSource(); s.buffer = buf; s.loop = true;
+      const fl = c.createBiquadFilter(); fl.type = type; fl.frequency.value = f; fl.Q.value = q;
+      const g = c.createGain(); g.gain.value = 0;
+      s.connect(fl); fl.connect(g); g.connect(this.master); s.start();
+      return g;
     };
-    musicTimer = setInterval(tick, 140);
-}
-
-export function setMusicTempo(speedNorm) {
-    if (!musicTimer) return;
-    const ms = 170 - speedNorm * 60; // faster run => faster music
-    clearInterval(musicTimer); musicTimer = null;
-    startMusicAdaptive(ms);
-}
-
-function startMusicAdaptive(ms) {
-    const tick = () => {
-        if (enabled) {
-            const s = step % 16;
-            if (s % 2 === 0) tone(BASS[(step / 2) % 8] * 2, ms * 0.0013, 'triangle', 0.25);
-            tone(LEAD[s], ms * 0.0009, 'square', 0.09);
-            if (s % 2 === 1) noiseBurst(0.04, 6000, 0.05);
-        }
-        step++;
-    };
-    musicTimer = setInterval(tick, ms);
+    this.rainG = mkLoop('highpass', 2600, 0.3);
+    this.windG = mkLoop('bandpass', 420, 0.8);
+    setInterval(() => this.tick(), 30);
+  }
+  setMuted(m) {
+    this.muted = m; localStorage.setItem('sc_mute', m ? '1' : '0');
+    if (this.ctx) this.master.gain.setTargetAtTime(m ? 0 : 0.9, this.ctx.currentTime, 0.03);
+  }
+  tone(f, dur, { type = 'sine', vol = 0.3, to = 0, delay = 0, out = this.sfx, attack = 0.005 } = {}) {
+    const c = this.ctx; if (!c) return;
+    const t = c.currentTime + delay, o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t);
+    if (to) o.frequency.exponentialRampToValueAtTime(to, t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + attack); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(out); o.start(t); o.stop(t + dur + 0.02);
+  }
+  noise(dur, { vol = 0.3, type = 'lowpass', f = 1000, to = 0, delay = 0, out = this.sfx, q = 0.7 } = {}) {
+    const c = this.ctx; if (!c) return;
+    const t = c.currentTime + delay, s = c.createBufferSource(), fl = c.createBiquadFilter(), g = c.createGain();
+    s.buffer = this.noiseBuf; s.playbackRate.value = 0.8 + Math.random() * 0.4;
+    fl.type = type; fl.frequency.setValueAtTime(f, t); fl.Q.value = q;
+    if (to) fl.frequency.exponentialRampToValueAtTime(to, t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(fl); fl.connect(g); g.connect(out); s.start(t, Math.random()); s.stop(t + dur + 0.02);
+  }
+  // ----- эффекты -----
+  coin() {
+    const now = performance.now();
+    this.combo = now - this.comboT < 450 ? Math.min(this.combo + 1, 12) : 0; this.comboT = now;
+    const f = 880 * Math.pow(2, this.combo / 12);
+    this.tone(f, 0.09, { type: 'square', vol: 0.11 }); this.tone(f * 1.5, 0.16, { type: 'square', vol: 0.09, delay: 0.05 });
+  }
+  jump() { this.tone(260, 0.22, { type: 'triangle', vol: 0.3, to: 620 }); this.noise(0.12, { vol: 0.08, type: 'highpass', f: 1800 }); }
+  roll() { this.noise(0.34, { vol: 0.24, type: 'bandpass', f: 1400, to: 300, q: 1.2 }); }
+  land() { this.tone(130, 0.1, { vol: 0.3, to: 55 }); this.noise(0.07, { vol: 0.1, f: 600 }); }
+  swipe() { this.noise(0.09, { vol: 0.1, type: 'bandpass', f: 2400, to: 900 }); }
+  bump() { this.tone(160, 0.12, { type: 'square', vol: 0.16, to: 70 }); }
+  crash() {
+    this.noise(0.5, { vol: 0.7, f: 2400, to: 90 }); this.tone(110, 0.45, { type: 'sawtooth', vol: 0.4, to: 32 });
+    this.tone(660, 0.6, { type: 'triangle', vol: 0.12, to: 110, delay: 0.1 });
+  }
+  power() { [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.16, { type: 'triangle', vol: 0.22, delay: i * 0.06 })); }
+  shield() { this.noise(0.35, { vol: 0.4, type: 'highpass', f: 900, to: 4000 }); this.tone(880, 0.3, { type: 'sine', vol: 0.25, to: 220 }); }
+  click() { this.tone(700, 0.05, { type: 'square', vol: 0.1 }); }
+  record() { [659, 784, 988, 1319, 1568].forEach((f, i) => this.tone(f, 0.22, { type: 'triangle', vol: 0.2, delay: i * 0.09 })); }
+  thunder() {
+    this.noise(2.6, { vol: 0.85, f: 500, to: 50, delay: 0.25, out: this.master });
+    this.noise(0.25, { vol: 0.4, f: 3500, to: 400, delay: 0.2, out: this.master });
+  }
+  setAmbience(rain, wind) {
+    if (!this.ctx) return;
+    this.rainG.gain.setTargetAtTime(rain * 0.16, this.ctx.currentTime, 0.4);
+    this.windG.gain.setTargetAtTime(wind * 0.1, this.ctx.currentTime, 0.4);
+  }
+  // ----- музыка: простой секвенсор -----
+  music(on) {
+    this.musicOn = on;
+    if (!this.ctx) return;
+    this.mus.gain.setTargetAtTime(on ? 0.5 : 0.0, this.ctx.currentTime, on ? 0.3 : 0.15);
+    if (on) { this.nextT = this.ctx.currentTime + 0.08; }
+  }
+  tick() {
+    const c = this.ctx;
+    if (!c || !this.musicOn || c.state !== 'running') return;
+    const spb = 60 / 126 / 4; // длительность шестнадцатой
+    if (this.nextT < c.currentTime - 0.3) this.nextT = c.currentTime + 0.05;
+    while (this.nextT < c.currentTime + 0.12) { this.playStep(this.step++, this.nextT - c.currentTime, spb); this.nextT += spb; }
+  }
+  playStep(s, delay, spb) {
+    const bar = Math.floor(s / 16) % 8, st = s % 16, o = this.mus;
+    const roots = [45, 45, 41, 41, 48, 48, 43, 43];              // A F C G
+    const minor = [1, 1, 0, 0, 0, 0, 0, 0];
+    const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+    const root = roots[bar], third = minor[bar] ? 3 : 4;
+    if (st % 4 === 0) { this.tone(150, 0.16, { vol: 0.75, to: 42, delay, out: o }); }          // бочка
+    if (st % 8 === 4) this.noise(0.13, { vol: 0.28, type: 'bandpass', f: 1900, delay, out: o }); // малый
+    if (st % 2 === 0) this.noise(0.035, { vol: st % 4 === 2 ? 0.13 : 0.06, type: 'highpass', f: 7000, delay, out: o });
+    if ([0, 3, 6, 8, 11, 14].includes(st)) this.tone(hz(root - 12 + (st === 14 ? 7 : 0)), spb * 1.7, { type: 'sawtooth', vol: 0.2, delay, out: o, attack: 0.01 });
+    const arp = [0, third, 7, 12, 7, third, 12, 7, 0, third, 7, 14, 12, 7, third, 7];
+    this.tone(hz(root + 12 + arp[st]), spb * 0.95, { type: 'square', vol: 0.055, delay, out: o });
+    if (st === 0 && bar % 2 === 0) for (const iv of [0, third, 7]) this.tone(hz(root + 12 + iv), spb * 30, { type: 'triangle', vol: 0.06, delay, out: o, attack: 0.3 });
+  }
 }

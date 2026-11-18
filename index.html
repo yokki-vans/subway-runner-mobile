@@ -1,53 +1,144 @@
-<!DOCTYPE html>
-<html lang="uk">
+<!doctype html>
+<html lang="ru">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta charset="utf-8">
+<title>Sprint City 3D</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="description" content="Sprint City 3D — бесконечный 3D-раннер для телефона: три полосы, трамваи, смена районов, погоды и времени суток.">
+<meta name="theme-color" content="#0d1330">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Subway Runner 3D — Mobile</title>
-<link rel="stylesheet" href="styles.css">
-<script type="importmap">
-{ "imports": { "three": "./three.module.js" } }
-</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1330'/%3E%3Ccircle cx='32' cy='32' r='17' fill='%23ffc928'/%3E%3Ccircle cx='32' cy='32' r='10' fill='%23f09a00'/%3E%3C/svg%3E">
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
+<style>
+  :root { --y: #ffc928; --ink: #0d1330; --panel: rgba(13, 19, 48, .72); --st: env(safe-area-inset-top, 0px); --sb: env(safe-area-inset-bottom, 0px); --sl: env(safe-area-inset-left, 0px); --sr: env(safe-area-inset-right, 0px); }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1330; color: #fff; overscroll-behavior: none; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-weight: 800; }
+  canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  [hidden] { display: none !important; }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; touch-action: manipulation; }
+
+  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+  #vign { position: fixed; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 55%, rgba(4, 8, 28, .38) 100%); }
+
+  /* HUD */
+  #hud { position: fixed; inset: 0; pointer-events: none; padding: calc(var(--st) + 12px) calc(var(--sr) + 12px) 0 calc(var(--sl) + 12px); }
+  .pill { display: inline-flex; align-items: center; gap: 8px; background: var(--panel); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border-radius: 999px; padding: 7px 14px; font-size: 22px; line-height: 1; font-variant-numeric: tabular-nums; box-shadow: 0 4px 0 rgba(0, 0, 0, .25); }
+  #hudL { position: absolute; left: calc(var(--sl) + 12px); top: calc(var(--st) + 12px); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  #hudR { position: absolute; right: calc(var(--sr) + 12px); top: calc(var(--st) + 12px); display: flex; gap: 8px; align-items: center; }
+  #mult { color: var(--ink); background: var(--y); border-radius: 999px; padding: 3px 8px; font-size: 15px; }
+  .coin { width: 20px; height: 20px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #fff3a8, #ffc928 45%, #e08a00); box-shadow: inset 0 0 0 2px #b96d00; display: inline-block; flex: none; }
+  #pauseBtn { pointer-events: auto; width: 44px; height: 44px; border-radius: 50%; background: var(--panel); font-size: 15px; box-shadow: 0 4px 0 rgba(0, 0, 0, .25); }
+  #powers { display: flex; flex-direction: column; gap: 6px; }
+  .pw { display: flex; align-items: center; gap: 8px; background: var(--panel); border-radius: 999px; padding: 5px 12px 5px 6px; font-size: 13px; }
+  .pw i { width: 22px; height: 22px; border-radius: 50%; display: inline-block; }
+  .pw .bar { width: 64px; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, .2); overflow: hidden; }
+  .pw .bar b { display: block; height: 100%; background: #fff; border-radius: 3px; }
+  #toast { position: fixed; left: 50%; top: calc(var(--st) + 76px); transform: translate(-50%, -10px); background: var(--panel); border-radius: 999px; padding: 8px 18px; font-size: 15px; opacity: 0; transition: opacity .35s, transform .35s; pointer-events: none; white-space: nowrap; }
+  #toast.on { opacity: 1; transform: translate(-50%, 0); }
+  #fps { position: fixed; left: calc(var(--sl) + 8px); bottom: calc(var(--sb) + 6px); font: 600 11px ui-monospace, Menlo, monospace; opacity: .75; pointer-events: none; text-shadow: 0 1px 2px #000; }
+
+  /* экраны */
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; padding: calc(var(--st) + 22px) 18px calc(var(--sb) + 22px); }
+  .title { margin: 0; font-size: clamp(44px, 14vw, 88px); line-height: .88; font-weight: 900; font-style: italic; letter-spacing: -.02em; text-align: center; text-transform: uppercase;
+    color: var(--y); text-shadow: 0 3px 0 #c9860a, 0 6px 0 #7a4b00, 0 12px 24px rgba(0, 0, 0, .45); transform: rotate(-4deg); }
+  .title span { display: block; color: #fff; text-shadow: 0 3px 0 #9aa7d6, 0 6px 0 #3a4686, 0 12px 24px rgba(0, 0, 0, .45); }
+  .sub { margin-top: 14px; font-size: 13px; letter-spacing: .14em; text-transform: uppercase; opacity: .9; text-shadow: 0 1px 4px rgba(0, 0, 0, .6); }
+  .grow { flex: 1; }
+  .card { width: min(420px, 100%); background: var(--panel); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-radius: 24px; padding: 16px; box-shadow: 0 10px 30px rgba(0, 0, 0, .35); }
+  .btn { display: block; width: 100%; padding: 16px; border-radius: 18px; background: var(--y); color: var(--ink); font-size: 24px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; box-shadow: 0 6px 0 #b9790a; transition: transform .08s, box-shadow .08s; }
+  .btn:active { transform: translateY(4px); box-shadow: 0 2px 0 #b9790a; }
+  .btn.ghost { background: rgba(255, 255, 255, .14); color: #fff; box-shadow: 0 6px 0 rgba(0, 0, 0, .3); font-size: 17px; padding: 13px; margin-top: 12px; }
+  .chars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+  .chars button { padding: 10px 2px; border-radius: 14px; background: rgba(255, 255, 255, .1); font-size: 12px; font-weight: 800; }
+  .chars button.on { background: #fff; color: var(--ink); }
+  .chars button.busy { opacity: .5; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 14px; }
+  .row b { font-size: 18px; }
+  .chip { background: rgba(255, 255, 255, .12); border-radius: 999px; padding: 8px 12px; font-size: 13px; }
+  .hint { margin: 12px 0 0; font-size: 12px; font-weight: 600; opacity: .8; text-align: center; line-height: 1.5; }
+  .credit { margin-top: 8px; font-size: 10px; font-weight: 600; opacity: .55; text-align: center; }
+  #loading { justify-content: center; background: linear-gradient(#1d3f8f, #0d1330); }
+  .lbar { width: min(260px, 70%); height: 10px; border-radius: 5px; background: rgba(255, 255, 255, .15); margin-top: 34px; overflow: hidden; }
+  .lbar b { display: block; height: 100%; width: 0; background: var(--y); border-radius: 5px; transition: width .2s; }
+  #lerr { margin-top: 16px; font-size: 13px; font-weight: 600; max-width: 320px; text-align: center; color: #ffb4a8; }
+  #pause, #over { justify-content: center; background: rgba(6, 10, 30, .5); }
+  .big { font-size: 56px; line-height: 1; text-align: center; font-variant-numeric: tabular-nums; }
+  .cap { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; opacity: .7; text-align: center; margin-bottom: 4px; }
+  .h2 { font-size: 30px; font-style: italic; font-weight: 900; text-transform: uppercase; text-align: center; margin: 0 0 14px; }
+  #rec { color: var(--y); text-align: center; font-size: 15px; margin: 8px 0 0; }
+  .stats { display: flex; justify-content: center; gap: 22px; margin: 14px 0 18px; font-size: 15px; }
+  .stats span { display: inline-flex; align-items: center; gap: 6px; }
+  @media (orientation: landscape) and (max-height: 520px) {
+    .title { font-size: clamp(30px, 11vh, 56px); } .sub { display: none; }
+    #menu { align-items: flex-end; } #menu .title { position: absolute; left: calc(var(--sl) + 24px); top: calc(var(--st) + 22px); }
+    .card { width: min(360px, 48%); padding: 12px; } .hint { display: none; } .btn { padding: 12px; font-size: 20px; }
+  }
+</style>
 </head>
 <body>
-<div id="hud" style="display:none">
-  <div class="hud-left"><span id="score">0</span><small>рахунок</small></div>
-  <div class="hud-mid"><span id="biome">DAY_CITY</span></div>
-  <div class="hud-right">
-    <span class="coin-pill">🪙 <b id="coins">0</b></span>
-    <button id="pauseBtn" aria-label="Пауза">⏸</button>
-    <button id="muteBtn" aria-label="Звук">🔊</button>
+<canvas id="c"></canvas>
+<div id="vign"></div>
+<div id="flash"></div>
+
+<div id="hud" hidden>
+  <div id="hudL">
+    <div class="pill"><span id="score">0</span><span id="mult">x1</span></div>
+    <div id="powers"></div>
+  </div>
+  <div id="hudR">
+    <div class="pill"><i class="coin"></i><span id="coins">0</span></div>
+    <button id="pauseBtn" aria-label="Пауза">❚❚</button>
   </div>
 </div>
-<div id="fps" style="display:none"></div>
+<div id="toast"></div>
+<div id="fps" hidden></div>
 
-<div id="menu">
-  <h1>SUBWAY<br>RUNNER&nbsp;3D</h1>
-  <p class="tag">Біги • Ухиляйся • Збирай монети</p>
-  <div class="chars">
-    <button class="charBtn sel" data-i="0" aria-label="Герой 1"><span class="dot" style="background:#f2a51e"></span></button>
-    <button class="charBtn" data-i="1" aria-label="Герой 2"><span class="dot" style="background:#2e6fbf"></span></button>
-    <button class="charBtn" data-i="2" aria-label="Герой 3"><span class="dot" style="background:#35b06f"></span></button>
+<div id="loading" class="screen">
+  <h1 class="title">Sprint<span>City</span></h1>
+  <div class="lbar"><b id="lbar"></b></div>
+  <div id="lerr"></div>
+</div>
+
+<div id="menu" class="screen" hidden>
+  <h1 class="title">Sprint<span>City</span></h1>
+  <div class="sub">бесконечный забег по городу</div>
+  <div class="grow"></div>
+  <div class="card">
+    <div class="row">
+      <span>Рекорд <b id="best">0</b></span>
+      <span style="display:inline-flex;align-items:center;gap:6px"><i class="coin"></i><b id="bank">0</b></span>
+      <button class="chip" id="muteBtn">Звук: вкл</button>
+    </div>
+    <div class="chars" id="chars"></div>
+    <button class="btn" id="playBtn">Бежать</button>
+    <p class="hint">Свайп ← → — смена полосы · ↑ прыжок · ↓ перекат<br>На компьютере: стрелки или WASD, пробел</p>
+    <p class="credit">Модели: KayKit (Kay Lousberg), CC0 · <span id="fpsToggle" style="pointer-events:auto;text-decoration:underline">показать FPS</span></p>
   </div>
-  <button id="startBtn">ГРАТИ</button>
-  <p class="hint">Свайп: ← → зміна смуги &nbsp;·&nbsp; ↑ стрибок &nbsp;·&nbsp; ↓ підкат<br>Клавіші: WASD / стрілки / Space</p>
 </div>
 
-<div id="gameover" style="display:none">
-  <h2>ГОНКА ЗАВЕРШЕНА</h2>
-  <p id="finalScore">Рахунок: 0</p>
-  <p id="bestScore" class="best">Рекорд: 0</p>
-  <button id="retryBtn">ЩЕ РАЗ</button>
+<div id="pause" class="screen" hidden>
+  <div class="card">
+    <h2 class="h2">Пауза</h2>
+    <button class="btn" id="resumeBtn">Продолжить</button>
+    <button class="btn ghost" id="pauseMute">Звук: вкл</button>
+    <button class="btn ghost" id="quitBtn">В меню</button>
+  </div>
 </div>
 
-<div id="pauseOverlay" style="display:none">
-  <h2>ПАУЗА</h2>
-  <button id="resumeBtn">ПРОДОВЖИТИ</button>
+<div id="over" class="screen" hidden>
+  <div class="card">
+    <div class="cap">Счёт</div>
+    <div class="big" id="oScore">0</div>
+    <p id="rec" hidden>Новый рекорд!</p>
+    <div class="stats"><span><i class="coin"></i><b id="oCoins">0</b></span><span>Дистанция <b id="oDist">0</b> м</span><span>Рекорд <b id="oBest">0</b></span></div>
+    <button class="btn" id="againBtn">Ещё раз</button>
+    <button class="btn ghost" id="menuBtn">В меню</button>
+  </div>
 </div>
 
-<script type="module" src="src/main.js"></script>
+<script type="module" src="./src/main.js"></script>
 </body>
 </html>
